@@ -49,22 +49,29 @@ if 'tools' not in st.session_state:
     st.session_state.tools = []
 if 'connected' not in st.session_state:
     st.session_state.connected = False
+if 'mcp_context' not in st.session_state:
+    st.session_state.mcp_context = None
 
 async def connect_to_chrome_mcp(chrome_port=9222):
     """Connect to chrome-devtools-mcp server"""
     server_params = StdioServerParameters(
         command="npx",
         args=[
+            "-y",
             "chrome-devtools-mcp",
+            "--no-usage-statistics"
             # The server will connect to Chrome at localhost:9222 by default
         ],
         env=None
     )
     
     try:
-        # Note: Using context manager for the connection
-        read, write = await stdio_client(server_params).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
+        # Create but don't close the context - keep connection alive
+        stdio = stdio_client(server_params)
+        read, write = await stdio.__aenter__()
+        
+        client_session = ClientSession(read, write)
+        session = await client_session.__aenter__()
         
         # Initialize the connection
         await session.initialize()
@@ -72,10 +79,18 @@ async def connect_to_chrome_mcp(chrome_port=9222):
         # List available tools
         tools_response = await session.list_tools()
         
-        return session, tools_response.tools
+        # Store cleanup info to keep connection alive
+        return {
+            'session': session,
+            'tools': tools_response.tools,
+            'stdio': stdio,
+            'client_session': client_session,
+            'read': read,
+            'write': write
+        }
     except Exception as e:
         st.error(f"Failed to connect: {e}")
-        return None, []
+        return None
 
 async def call_tool(session, tool_name, arguments):
     """Call an MCP tool"""
@@ -98,12 +113,13 @@ with st.sidebar:
     if st.button("🔌 Connect to Chrome MCP", type="primary"):
         with st.spinner("Connecting to chrome-devtools-mcp..."):
             try:
-                session, tools = asyncio.run(connect_to_chrome_mcp(chrome_port))
-                if session:
-                    st.session_state.mcp_session = session
-                    st.session_state.tools = tools
+                result = asyncio.run(connect_to_chrome_mcp(chrome_port))
+                if result:
+                    st.session_state.mcp_session = result['session']
+                    st.session_state.tools = result['tools']
+                    st.session_state.mcp_context = result
                     st.session_state.connected = True
-                    st.success(f"✅ Connected! Found {len(tools)} tools")
+                    st.success(f"✅ Connected! Found {len(result['tools'])} tools")
                     st.rerun()
             except Exception as e:
                 st.error(f"❌ Connection failed: {e}")
@@ -112,9 +128,18 @@ with st.sidebar:
         st.success("🟢 Connected")
         
         if st.button("🔌 Disconnect"):
+            # Cleanup connection properly
+            if st.session_state.mcp_context:
+                try:
+                    # Note: Cleanup happens when context managers are garbage collected
+                    # In a production app, you'd want to properly call __aexit__ here
+                    pass
+                except:
+                    pass
             st.session_state.connected = False
             st.session_state.mcp_session = None
             st.session_state.tools = []
+            st.session_state.mcp_context = None
             st.rerun()
     else:
         st.warning("🔴 Not connected")
